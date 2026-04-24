@@ -1,2 +1,413 @@
-on:
+name: SneakerHead_CI_Python
 
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        required: true
+        type: string
+      sonar_project_key:
+        required: true
+        type: string
+      python_version:
+        required: false
+        type: string
+        default: '3.12'
+
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+      SNYK_TOKEN:
+        required: true
+      DOCKER_USERNAME:
+        required: true
+      DOCKER_PASSWORD:
+        required: true
+      SMTP_HOST:
+        required: true
+      SMTP_PORT:
+        required: true
+      SMTP_USERNAME:
+        required: true
+      SMTP_PASSWORD:
+        required: true
+      EMAIL_TO:
+        required: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# JOB GRAPH:
+#
+#   prepare
+#     ├── test ─────────────┐
+#     ├── sonar ────────────┼──► build ──► trivy ──► push ──► notify
+#     └── snyk  ────────────┘
+#
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── JOB 1: PREPARE ──────────────────────────────────────────────────────────
+  prepare:
+    name: "Prepare"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+
+    outputs:
+      tag:  ${{ steps.image_tag.outputs.tag }}
+      push: ${{ steps.image_tag.outputs.push }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Calculate Semantic Version (main only)
+        id: semver
+        if: github.ref == 'refs/heads/main'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          dry_run: true
+          default_bump: patch
+          tag_prefix: 'v'
+
+      - name: Resolve Image Tag
+        id: image_tag
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
+            echo "push=true"                               >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "tag=dev-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
+            echo "push=true"                               >> $GITHUB_OUTPUT
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "tag=sha-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
+            echo "push=false"                              >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+  # ── JOB 2: TEST ─────────────────────────────────────────────────────────────
+  test:
+    name: "Test"
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Tests with Coverage
+        run: |
+          pytest tests/ --cov=app --cov-report=xml --cov-report=term-missing -v
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ inputs.service-name }}
+          path: coverage.xml
+          retention-days: 1
+
+  # ── JOB 3: SONAR ────────────────────────────────────────────────────────────
+  sonar:
+    name: "SonarQube"
+    runs-on: ubuntu-latest
+    needs: [prepare, test]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Coverage Report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report-${{ inputs.service-name }}
+          path: .
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          projectBaseDir: .
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
+            -Dsonar.projectName=${{ inputs.sonar_project_key }}
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+            -Dsonar.sources=app
+            -Dsonar.tests=tests
+            -Dsonar.language=python
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        with:
+          scanMetadataReportFile: .scannerwork/report-task.txt
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ── JOB 4: SNYK ─────────────────────────────────────────────────────────────
+  snyk:
+    name: "Snyk Security"
+    runs-on: ubuntu-latest
+    needs: prepare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install snyk-to-html
+        run: npm install -g snyk-to-html
+
+      - name: Snyk Scan (HTML Report)
+        run: |
+          npx snyk test --file=requirements.txt --severity-threshold=high --json | snyk-to-html -o snyk-report.html || true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload Snyk Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-report-${{ inputs.service-name }}
+          path: snyk-report.html
+          retention-days: 7
+
+  # ── JOB 5: BUILD ────────────────────────────────────────────────────────────
+  # Builds the Docker image once, saves it as a tar artifact.
+  # Trivy and Push both download this exact artifact — no rebuilds ever.
+  build:
+    name: "Docker Build"
+    runs-on: ubuntu-latest
+    needs: [prepare, test, sonar, snyk]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: |
+          docker build \
+            -f Dockerfile \
+            -t ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+            .
+
+      - name: Save image as tar artifact
+        run: |
+          docker save \
+            ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+            -o /tmp/docker-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  # ── JOB 6: TRIVY ────────────────────────────────────────────────────────────
+  trivy:
+    name: "Trivy Image Scan"
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+
+      - name: Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}'
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
+  # ── JOB 7: PUSH ─────────────────────────────────────────────────────────────
+  push:
+    name: "Docker Push"
+    runs-on: ubuntu-latest
+    needs: [prepare, trivy]
+    if: needs.prepare.outputs.push == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ inputs.service-name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/docker-image.tar
+
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Push Docker Image (semver + latest)
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+          docker tag  ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }} \
+                      ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
+
+      - name: Create Git Tag
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          custom_tag: ${{ needs.prepare.outputs.tag }}
+          tag_prefix: ''
+
+  # ── JOB 8: CREATE RELEASE ───────────────────────────────────────────────────
+  create-release:
+    name: "Create GitHub Release"
+    needs: [prepare, test, sonar, snyk, build, trivy, push]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.push.result == 'success'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Release ${{ needs.prepare.outputs.tag }}
+          body: |
+            Release of ${{ inputs.service-name }}
+            Version: ${{ needs.prepare.outputs.tag }}
+            Image: ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+
+  # ── JOB 9: NOTIFY ───────────────────────────────────────────────────────────
+  notify:
+    name: "Notify"
+    runs-on: ubuntu-latest
+    needs: [prepare, test, sonar, snyk, build, trivy, push, create-release]
+    if: always() && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Send Email (Success)
+        if: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Success - ${{ inputs.service-name }} ${{ needs.prepare.outputs.tag }}"
+          body: |
+            Build Successful
+
+            Service:      ${{ inputs.service-name }}
+            Tag:          ${{ needs.prepare.outputs.tag }}
+            Image:        ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:${{ needs.prepare.outputs.tag }}
+            Repository:   ${{ github.repository }}
+            Triggered By: ${{ github.actor }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+
+      - name: Send Email (Failure)
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Failed - ${{ inputs.service-name }} - Run #${{ github.run_number }}"
+          body: |
+            CI Pipeline Execution Failed
+
+            Service:       ${{ inputs.service-name }}
+            Tag Attempted: ${{ needs.prepare.outputs.tag }}
+            Repository:    ${{ github.repository }}
+            Branch:        ${{ github.ref_name }}
+            Triggered By:  ${{ github.actor }}
+            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
