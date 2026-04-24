@@ -138,6 +138,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Tests with Coverage
+        env:
+          PYTHONPATH: .
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/testdb
         run: |
           pytest tests/ --cov=app --cov-report=xml --cov-report=term-missing -v
 
