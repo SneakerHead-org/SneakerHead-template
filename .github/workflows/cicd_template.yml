@@ -36,15 +36,6 @@ on:
       EMAIL_TO:
         required: true
 
-# ──────────────────────────────────────────────────────────────────────────────
-# JOB GRAPH:
-#
-#   prepare
-#     ├── test ─────────────┐
-#     ├── sonar ────────────┼──► build ──► trivy ──► push ──► notify
-#     └── snyk  ────────────┘
-#
-# ──────────────────────────────────────────────────────────────────────────────
 jobs:
 
   # ── JOB 1: PREPARE ──────────────────────────────────────────────────────────
@@ -272,7 +263,7 @@ jobs:
   trivy:
     name: "Trivy Image Scan"
     runs-on: ubuntu-latest
-    needs: [prepare, build]
+    needs: [prepare, snyk, build]
 
     steps:
       - name: Download image artifact
@@ -297,7 +288,7 @@ jobs:
   push:
     name: "Docker Push"
     runs-on: ubuntu-latest
-    needs: [prepare, trivy]
+    needs: [prepare, snyk, build, trivy]
     if: needs.prepare.outputs.push == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
 
     permissions:
