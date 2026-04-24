@@ -94,7 +94,7 @@ jobs:
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
             echo "push=true"                               >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
             echo "tag=dev-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
             echo "push=true"                               >> $GITHUB_OUTPUT
@@ -295,7 +295,7 @@ jobs:
     name: "Docker Push"
     runs-on: ubuntu-latest
     needs: [prepare, trivy]
-    if: needs.prepare.outputs.push == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    if: needs.prepare.outputs.push == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
 
     permissions:
       contents: write
