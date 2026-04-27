@@ -409,7 +409,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          #repositories: ${{ secrets.MANIFEST_REPO }}
+          repositories: ${{ secrets.MANIFEST_REPO }}
 
       # ── Checkout the manifest repo ───────────────────────────────────
       - name: Checkout manifest repo
