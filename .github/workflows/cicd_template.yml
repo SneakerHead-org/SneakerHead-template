@@ -341,6 +341,7 @@ jobs:
           docker push ${{ secrets.DOCKER_USERNAME }}/${{ inputs.service-name }}:latest
 
       - name: Create Git Tag
+        if: github.ref == 'refs/heads/main'
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ github.token }}
