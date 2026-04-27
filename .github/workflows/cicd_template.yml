@@ -307,7 +307,7 @@ jobs:
     name: "Docker Push"
     runs-on: ubuntu-latest
     needs: [prepare, trivy]
-    if: needs.prepare.outputs.push == 'true' 
+    if: needs.prepare.outputs.push == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
 
     permissions:
       contents: write
